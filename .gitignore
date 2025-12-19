@@ -1,0 +1,13 @@
+.env
+.env.docker
+token.json
+client_secret.json
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+venv/
+env/
+test*.py
+.git
