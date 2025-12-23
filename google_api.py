@@ -5,6 +5,7 @@ from google.auth.transport.requests import Request
 from email.mime.text import MIMEText
 import base64
 import os
+import json
 from config import GOOGLE_SCOPES, CLIENT_SECRET_FILE, TOKEN_FILE
 from models import MeetingDetails
 from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
@@ -19,32 +20,64 @@ class GoogleCalendarAPI:
         self.gmail_service = build('gmail', 'v1', credentials=self.creds)
 
     def _get_credentials(self):
-        """Get or refresh Google credentials"""
+        """Get or refresh Google credentials (works locally and in production)"""
         creds = None
-
-        if os.path.exists(TOKEN_FILE):
+        
+        # PRODUCTION: Try environment variables first
+        if os.getenv('GOOGLE_TOKEN'):
+            print("📍 Using Google credentials from environment variables")
+            token_data = json.loads(os.getenv('GOOGLE_TOKEN'))
+            creds = Credentials.from_authorized_user_info(token_data, GOOGLE_SCOPES)
+        
+        # LOCAL: Try token.json file
+        elif os.path.exists(TOKEN_FILE):
+            print("📍 Using Google credentials from token.json file")
             creds = Credentials.from_authorized_user_file(TOKEN_FILE, GOOGLE_SCOPES)
-
+        
+        # Refresh if expired
+        if creds and creds.expired and creds.refresh_token:
+            print("🔄 Refreshing expired credentials")
+            creds.refresh(Request())
+            
+            # Save refreshed token (only works locally)
+            if not os.getenv('GOOGLE_TOKEN') and os.path.exists(TOKEN_FILE):
+                with open(TOKEN_FILE, 'w') as token:
+                    token.write(creds.to_json())
+        
+        # If no valid credentials, need to authenticate
         if not creds or not creds.valid:
-            if creds and creds.expired and creds.refresh_token:
-                creds.refresh(Request())
+            print("⚠️ No valid credentials found")
+            
+            # PRODUCTION: Use client secret from env var
+            if os.getenv('GOOGLE_CLIENT_SECRET'):
+                print("📍 Authenticating with client secret from environment")
+                client_config = json.loads(os.getenv('GOOGLE_CLIENT_SECRET'))
+                flow = InstalledAppFlow.from_client_config(client_config, GOOGLE_SCOPES)
+            
+            # LOCAL: Use client_secret.json file
+            elif os.path.exists(CLIENT_SECRET_FILE):
+                print("📍 Authenticating with client_secret.json file")
+                flow = InstalledAppFlow.from_client_secrets_file(CLIENT_SECRET_FILE, GOOGLE_SCOPES)
+            
             else:
-                flow = InstalledAppFlow.from_client_secrets_file(
-                    CLIENT_SECRET_FILE,
-                    GOOGLE_SCOPES
-                )
-                creds = flow.run_local_server(port=0)
-
-            with open(TOKEN_FILE, 'w') as token:
-                token.write(creds.to_json())
-
+                raise Exception("No Google credentials found. Please set GOOGLE_TOKEN and GOOGLE_CLIENT_SECRET environment variables for production, or ensure client_secret.json exists locally.")
+            
+            # This will open browser (only works locally)
+            creds = flow.run_local_server(port=0)
+            
+            # Save credentials (only works locally)
+            if not os.getenv('GOOGLE_TOKEN'):
+                with open(TOKEN_FILE, 'w') as token:
+                    token.write(creds.to_json())
+        
+        print("✅ Google credentials loaded successfully")
         return creds
 
     @retry(
-        stop=stop_after_attempt(3),  # Try 3 times
-        wait=wait_exponential(multiplier=1, min=2, max=10),  # Wait 2s, 4s, 8s
-        retry=retry_if_exception_type(Exception),  # Retry on any error
-        reraise=True  # Raise error after all retries fail
+        stop=stop_after_attempt(3),
+        wait=wait_exponential(multiplier=1, min=2, max=10),
+        retry=retry_if_exception_type(Exception),
+        reraise=True
     )
     def create_calendar_event(self, meeting: MeetingDetails) -> dict:
         """Create a Google Calendar event with automatic retries"""
@@ -84,7 +117,7 @@ class GoogleCalendarAPI:
 
         except Exception as e:
             print(f"❌ Calendar API error (will retry): {str(e)}")
-            raise  # Let tenacity handle the retry
+            raise
 
     @retry(
         stop=stop_after_attempt(3),
@@ -118,4 +151,4 @@ class GoogleCalendarAPI:
 
         except Exception as e:
             print(f"❌ Gmail API error (will retry): {str(e)}")
-            raise  # Let tenacity handle the retry
+            raise
